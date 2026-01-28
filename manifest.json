@@ -1,0 +1,19 @@
+﻿{
+  "manifest_version": 3,
+  "name": "Aalborg Prayer Times",
+  "version": "1.0.0",
+  "description": "Daily prayer times for Aalborg, Denmark.",
+  "action": {
+    "default_title": "Prayer Times",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "128": "image.png"
+    }
+  },
+  "icons": {
+    "128": "icon.png"
+  },
+  "host_permissions": [
+    "https://sajda.com/*"
+  ]
+}

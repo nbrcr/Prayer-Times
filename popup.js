@@ -2,6 +2,7 @@
 const COUNTDOWN_NAMES = ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"];
 const SOURCE_URL = "https://sajda.com/en/prayer-times/denmark/north-denmark-aalborg/2624886?asr=standard";
 const NAMES_URL = "names.json";
+const CACHE_KEY = "prayerTimesCache";
 let currentTimes = null;
 let countdownTimer = null;
 
@@ -133,6 +134,36 @@ function dayOfYear(date) {
   return Math.floor(diff / 86400000);
 }
 
+function getTodayKey() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function readCachedTimes() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    if (parsed.date !== getTodayKey()) return null;
+    if (!parsed.times || typeof parsed.times !== "object") return null;
+    return parsed.times;
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedTimes(times) {
+  const payload = {
+    date: getTodayKey(),
+    times
+  };
+  localStorage.setItem(CACHE_KEY, JSON.stringify(payload));
+}
+
 async function loadNameOfAllah() {
   try {
     const url = chrome.runtime.getURL(NAMES_URL);
@@ -145,17 +176,25 @@ async function loadNameOfAllah() {
     const index = (dayOfYear(today) - 1) % names.length;
     const entry = names[index] || names[0];
 
-    document.getElementById("name-arabic").textContent = entry.arabic || "—";
     document.getElementById("name-translit").textContent = entry.transliteration || "—";
     document.getElementById("name-meaning").textContent = entry.meaning || "—";
   } catch (err) {
-    document.getElementById("name-arabic").textContent = "—";
     document.getElementById("name-translit").textContent = "—";
     document.getElementById("name-meaning").textContent = "—";
   }
 }
 
 async function loadTimes() {
+  const cached = readCachedTimes();
+  if (cached) {
+    currentTimes = cached;
+    setTimes(cached);
+    updateCountdown();
+    if (countdownTimer) clearInterval(countdownTimer);
+    countdownTimer = setInterval(updateCountdown, 1000);
+    return;
+  }
+
   try {
     const response = await fetch(SOURCE_URL, { credentials: "omit" });
     if (!response.ok) throw new Error("HTTP " + response.status);
@@ -166,6 +205,7 @@ async function loadTimes() {
     if (!hasAll) throw new Error("Missing times");
 
     currentTimes = times;
+    saveCachedTimes(times);
     setTimes(times);
     updateCountdown();
     if (countdownTimer) clearInterval(countdownTimer);

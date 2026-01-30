@@ -5,10 +5,7 @@
   "description": "Daily prayer times for Aalborg, Denmark.",
   "action": {
     "default_title": "Prayer Times",
-    "default_popup": "popup.html",
-    "default_icon": {
-      "128": "image.png"
-    }
+    "default_popup": "popup.html"
   },
   "icons": {
     "128": "icon.png"

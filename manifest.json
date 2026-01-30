@@ -10,9 +10,16 @@
       "128": "icon.png"
     }
   },
+  "background": {
+    "service_worker": "background.js"
+  },
   "icons": {
     "128": "icon.png"
   },
+  "permissions": [
+    "alarms",
+    "storage"
+  ],
   "host_permissions": [
     "https://sajda.com/*"
   ]

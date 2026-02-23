@@ -1,93 +1,114 @@
 const PRAYER_NAMES = ["Fajr", "Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha"];
 const COUNTDOWN_NAMES = ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"];
-const SOURCE_URL = "https://sajda.com/en/prayer-times/denmark/north-denmark-aalborg/2624886?asr=standard";
+const SOURCE_GUID = "1820245c-9db2-4b80-b9b7-d93dbb7879ef";
+const SOURCE_URL = `https://time.my-masjid.com/api/TimingsInfoScreen/GetMasjidTimings?GuidId=${SOURCE_GUID}`;
 const CACHE_KEY = "prayerTimesCache";
 const BADGE_ALARM = "updateBadge";
 
-function parseTimesFromHtml(html) {
-  const result = {};
-  let sourceText = html;
-  const anchorIndex = html.search(/What are the prayer times/i);
-  if (anchorIndex !== -1) {
-    sourceText = html.slice(anchorIndex, anchorIndex + 2500);
-  }
+function normalizeTimeValue(value) {
+  if (value === null || value === undefined) return null;
+  const match = String(value).trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
 
-  const text = sourceText.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-  const regex = /\b(Fajr|Sunrise|Dhuhr|Asr|Maghrib|Isha)\b\s*(\d{1,2}:\d{2})\b/gi;
-  const matches = [];
-  let match;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
 
-  while ((match = regex.exec(text))) {
-    matches.push({
-      name: match[1],
-      time: match[2],
-      index: match.index
-    });
-  }
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
 
-  const sequences = [];
-  for (let i = 0; i < matches.length; i++) {
-    if (matches[i].name.toLowerCase() !== "fajr") continue;
-    let lastIndex = matches[i].index;
-    const sequence = { Fajr: matches[i], Sunrise: null, Dhuhr: null, Asr: null, Maghrib: null, Isha: null };
-    const namesToFind = ["Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha"];
+function parseTimeToMinutes(timeText) {
+  const normalized = normalizeTimeValue(timeText);
+  if (!normalized) return null;
+  const [hoursText, minutesText] = normalized.split(":");
+  return Number(hoursText) * 60 + Number(minutesText);
+}
 
-    for (const name of namesToFind) {
-      const found = matches.find((item, idx) => idx > i && item.name === name && item.index > lastIndex);
-      if (!found) {
-        sequence[name] = null;
-        break;
-      }
-      sequence[name] = found;
-      lastIndex = found.index;
-    }
+function parseTimeToDate(timeText, baseDate) {
+  const minutes = parseTimeToMinutes(timeText);
+  if (minutes === null) return null;
 
-    if (namesToFind.every((name) => sequence[name])) {
-      const span = lastIndex - matches[i].index;
-      sequences.push({ sequence, span });
-    }
-  }
+  const date = new Date(baseDate);
+  date.setHours(0, 0, 0, 0);
+  date.setMinutes(minutes);
+  return date;
+}
 
-  const best = sequences.sort((a, b) => a.span - b.span)[0];
-  if (best) {
-    for (const name of PRAYER_NAMES) {
-      result[name] = best.sequence[name].time;
-    }
-    return result;
-  }
+function getTodaySalahEntry(model, now = new Date()) {
+  if (!model || typeof model !== "object") return null;
+  if (!Array.isArray(model.salahTimings)) return null;
 
-  for (const item of matches) {
-    if (!result[item.name]) result[item.name] = item.time;
-  }
+  const month = now.getMonth() + 1;
+  const day = now.getDate();
 
-  return result;
+  return (
+    model.salahTimings.find((entry) => Number(entry?.month) === month && Number(entry?.day) === day) || null
+  );
+}
+
+function parseTimesFromPayload(payload, now = new Date()) {
+  const model = payload?.model;
+  const today = getTodaySalahEntry(model, now);
+  if (!today) return null;
+
+  return {
+    Fajr: normalizeTimeValue(today.fajr),
+    Sunrise: normalizeTimeValue(today.shouruq),
+    Dhuhr: normalizeTimeValue(today.zuhr),
+    Asr: normalizeTimeValue(today.asr),
+    Maghrib: normalizeTimeValue(today.maghrib),
+    Isha: normalizeTimeValue(today.isha)
+  };
 }
 
 function isValidTimes(times) {
   if (!times || typeof times !== "object") return false;
   if (!PRAYER_NAMES.every((name) => times[name])) return false;
-  const order = ["Fajr", "Sunrise", "Dhuhr", "Asr", "Maghrib", "Isha"];
-  let last = -1;
 
-  for (const name of order) {
-    const parsed = parseTimeToDate(times[name], new Date(2000, 0, 1));
-    if (!parsed) return false;
-    const minutes = parsed.getHours() * 60 + parsed.getMinutes();
-    if (minutes <= last) return false;
-    last = minutes;
+  let dayOffset = 0;
+  let lastMinutes = -1;
+  for (const name of PRAYER_NAMES) {
+    const timeMinutes = parseTimeToMinutes(times[name]);
+    if (timeMinutes === null) return false;
+
+    let absoluteMinutes = timeMinutes + dayOffset * 1440;
+    if (absoluteMinutes <= lastMinutes) {
+      dayOffset += 1;
+      absoluteMinutes = timeMinutes + dayOffset * 1440;
+    }
+    if (absoluteMinutes <= lastMinutes) return false;
+    lastMinutes = absoluteMinutes;
   }
 
   return true;
 }
 
-function parseTimeToDate(timeText, baseDate) {
-  const match = timeText.match(/^(\d{1,2}):(\d{2})$/);
-  if (!match) return null;
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  const date = new Date(baseDate);
-  date.setHours(hours, minutes, 0, 0);
-  return date;
+function buildSchedule(times, baseDate) {
+  const start = new Date(baseDate);
+  start.setHours(0, 0, 0, 0);
+
+  const schedule = [];
+  let dayOffset = 0;
+  let lastMinutes = -1;
+
+  for (const name of COUNTDOWN_NAMES) {
+    const minutes = parseTimeToMinutes(times[name]);
+    if (minutes === null) continue;
+
+    let absoluteMinutes = minutes + dayOffset * 1440;
+    if (absoluteMinutes <= lastMinutes) {
+      dayOffset += 1;
+      absoluteMinutes = minutes + dayOffset * 1440;
+    }
+
+    const time = new Date(start);
+    time.setMinutes(absoluteMinutes);
+    schedule.push({ name, time });
+    lastMinutes = absoluteMinutes;
+  }
+
+  return schedule;
 }
 
 function getTodayKey() {
@@ -118,11 +139,10 @@ async function saveCachedTimes(times) {
 
 function getNextPrayer(times) {
   const now = new Date();
-  for (const name of COUNTDOWN_NAMES) {
-    const timeText = times[name];
-    const timeDate = parseTimeToDate(timeText, now);
-    if (timeDate && timeDate > now) {
-      return { name, time: timeDate };
+  const schedule = buildSchedule(times, now);
+  for (const item of schedule) {
+    if (item.time > now) {
+      return item;
     }
   }
 
@@ -144,10 +164,10 @@ async function loadTimes() {
   const cached = await readCachedTimes();
   if (cached) return cached;
 
-  const response = await fetch(SOURCE_URL, { credentials: "omit" });
+  const response = await fetch(SOURCE_URL, { credentials: "omit", cache: "no-store" });
   if (!response.ok) throw new Error("HTTP " + response.status);
-  const html = await response.text();
-  const times = parseTimesFromHtml(html);
+  const payload = await response.json();
+  const times = parseTimesFromPayload(payload);
   if (!isValidTimes(times)) throw new Error("Missing times");
   await saveCachedTimes(times);
   return times;

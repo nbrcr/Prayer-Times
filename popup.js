@@ -5,10 +5,18 @@ const MASJID_GUID_KEY = "masjidSourceGuid";
 const SOURCE_URL_PREFIX = "https://time.my-masjid.com/api/TimingsInfoScreen/GetMasjidTimings?GuidId=";
 const NAMES_URL = "names.json";
 const CACHE_KEY = "prayerTimesCache";
+const REQUEST_TIMEOUT_MS = 4500;
+const RETRY_DELAYS_MS = [300, 900];
 const GUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const GUID_FINDER_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const DASH = "--";
+
 let currentData = null;
 let countdownTimer = null;
+
+function getEl(id) {
+  return document.getElementById(id);
+}
 
 function buildSourceUrl(guid) {
   return `${SOURCE_URL_PREFIX}${guid}`;
@@ -63,15 +71,29 @@ async function setStoredSourceGuid(guid) {
   await chrome.storage.local.set({ [MASJID_GUID_KEY]: guid });
 }
 
-function setStatus(message) {
-  const statusEl = document.getElementById("status");
+function setStatus(message, options = {}) {
+  const { hideTimes = true } = options;
+  const statusEl = getEl("status");
+  const timesEl = getEl("times");
+  if (!statusEl || !timesEl) return;
+
+  if (!message) {
+    statusEl.hidden = true;
+    statusEl.textContent = "";
+    return;
+  }
+
   statusEl.textContent = message;
   statusEl.hidden = false;
-  document.getElementById("times").hidden = true;
+  if (hideTimes) {
+    timesEl.hidden = true;
+  }
 }
 
 function setConfigStatus(message, type = "info") {
-  const statusEl = document.getElementById("masjid-config-status");
+  const statusEl = getEl("masjid-config-status");
+  if (!statusEl) return;
+
   if (!message) {
     statusEl.hidden = true;
     statusEl.textContent = "";
@@ -85,33 +107,41 @@ function setConfigStatus(message, type = "info") {
 }
 
 function setTimes(data) {
+  if (!data || !data.times) return;
   const { times } = data;
 
   for (const name of PRAYER_NAMES) {
-    const el = document.getElementById(name);
-    el.textContent = times[name] || "—";
+    const el = getEl(name);
+    if (el) el.textContent = times[name] || DASH;
   }
 
-  const locationEl = document.getElementById("location");
-  locationEl.textContent = data.locationLabel || "Aalborg, Denmark";
+  const locationEl = getEl("location");
+  if (locationEl) locationEl.textContent = data.locationLabel || "Aalborg, Denmark";
 
-  const jumuahMeta = document.getElementById("jumuah-meta");
-  const jumuahEl = document.getElementById("Jumuah");
-  if (data.jumuahTime) {
-    jumuahEl.textContent = data.jumuahTime;
-    jumuahMeta.hidden = false;
-  } else {
-    jumuahEl.textContent = "—";
-    jumuahMeta.hidden = true;
+  const jumuahMeta = getEl("jumuah-meta");
+  const jumuahEl = getEl("Jumuah");
+  if (jumuahMeta && jumuahEl) {
+    if (data.jumuahTime) {
+      jumuahEl.textContent = data.jumuahTime;
+      jumuahMeta.hidden = false;
+    } else {
+      jumuahEl.textContent = DASH;
+      jumuahMeta.hidden = true;
+    }
   }
 
-  document.getElementById("status").hidden = true;
-  document.getElementById("times").hidden = false;
-  document.getElementById("next").hidden = false;
+  const statusEl = getEl("status");
+  const timesEl = getEl("times");
+  const nextEl = getEl("next");
+  if (statusEl) statusEl.hidden = true;
+  if (timesEl) timesEl.hidden = false;
+  if (nextEl) nextEl.hidden = false;
 }
 
 function updateDate() {
-  const dateEl = document.getElementById("date");
+  const dateEl = getEl("date");
+  if (!dateEl) return;
+
   const today = new Date();
   dateEl.textContent = today.toLocaleDateString(undefined, {
     weekday: "long",
@@ -209,11 +239,13 @@ function updateCountdown() {
   const now = new Date();
   const next = getNextPrayer(currentData.times, now);
 
-  const nameEl = document.getElementById("next-name");
-  const countdownEl = document.getElementById("next-countdown");
+  const nameEl = getEl("next-name");
+  const countdownEl = getEl("next-countdown");
+  if (!nameEl || !countdownEl) return;
+
   if (!next || !next.time) {
     nameEl.textContent = "Next";
-    countdownEl.textContent = "—";
+    countdownEl.textContent = DASH;
     return;
   }
 
@@ -272,22 +304,29 @@ function readCachedData(sourceGuid) {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return null;
-    if (parsed.date !== getTodayKey()) return null;
     if (normalizeGuid(parsed.guid || "") !== sourceGuid) return null;
     if (!isValidData(parsed.data)) return null;
-    return parsed.data;
+
+    return {
+      data: parsed.data,
+      isFresh: parsed.date === getTodayKey()
+    };
   } catch {
     return null;
   }
 }
 
 function saveCachedData(sourceGuid, data) {
-  const payload = {
-    date: getTodayKey(),
-    guid: sourceGuid,
-    data
-  };
-  localStorage.setItem(CACHE_KEY, JSON.stringify(payload));
+  try {
+    const payload = {
+      date: getTodayKey(),
+      guid: sourceGuid,
+      data
+    };
+    localStorage.setItem(CACHE_KEY, JSON.stringify(payload));
+  } catch {
+    // Ignore storage write failures.
+  }
 }
 
 function getTodaySalahEntry(model, now = new Date()) {
@@ -342,7 +381,52 @@ function startCountdownTimer() {
   countdownTimer = setInterval(updateCountdown, 1000);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchPayloadWithTimeout(sourceGuid) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(buildSourceUrl(sourceGuid), {
+      credentials: "omit",
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    return await response.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function fetchLatestData(sourceGuid) {
+  let lastError = null;
+  const attempts = RETRY_DELAYS_MS.length + 1;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const payload = await fetchPayloadWithTimeout(sourceGuid);
+      const data = buildDataFromPayload(payload);
+      if (!isValidData(data)) throw new Error("Missing times");
+      return data;
+    } catch (error) {
+      lastError = error;
+      if (attempt < RETRY_DELAYS_MS.length) {
+        await sleep(RETRY_DELAYS_MS[attempt]);
+      }
+    }
+  }
+
+  throw lastError || new Error("Failed to load times");
+}
+
 async function loadNameOfAllah() {
+  const translitEl = getEl("name-translit");
+  const meaningEl = getEl("name-meaning");
+  if (!translitEl || !meaningEl) return;
+
   try {
     const url = chrome.runtime.getURL(NAMES_URL);
     const response = await fetch(url);
@@ -354,49 +438,63 @@ async function loadNameOfAllah() {
     const index = (dayOfYear(today) - 1) % names.length;
     const entry = names[index] || names[0];
 
-    document.getElementById("name-translit").textContent = entry.transliteration || "—";
-    document.getElementById("name-meaning").textContent = entry.meaning || "—";
+    translitEl.textContent = entry.transliteration || DASH;
+    meaningEl.textContent = entry.meaning || DASH;
   } catch {
-    document.getElementById("name-translit").textContent = "—";
-    document.getElementById("name-meaning").textContent = "—";
+    translitEl.textContent = DASH;
+    meaningEl.textContent = DASH;
   }
 }
 
-async function loadTimes(forceRefresh = false) {
-  const sourceGuid = await getStoredSourceGuid();
-
-  if (!forceRefresh) {
-    const cached = readCachedData(sourceGuid);
-    if (cached) {
-      currentData = cached;
-      setTimes(cached);
-      startCountdownTimer();
-      return;
+async function loadTimes(options = {}) {
+  const { forceRefresh = false, sourceGuid: suppliedGuid } = options;
+  let sourceGuid = suppliedGuid;
+  if (!sourceGuid) {
+    try {
+      sourceGuid = await getStoredSourceGuid();
+    } catch {
+      sourceGuid = DEFAULT_SOURCE_GUID;
     }
+  }
+  const cachedEntry = readCachedData(sourceGuid);
+
+  if (cachedEntry) {
+    currentData = cachedEntry.data;
+    setTimes(cachedEntry.data);
+    startCountdownTimer();
+
+    if (!forceRefresh && cachedEntry.isFresh) return;
+    setStatus("Refreshing prayer times...", { hideTimes: false });
+  } else {
+    setStatus("Loading prayer times...");
+    const nextEl = getEl("next");
+    if (nextEl) nextEl.hidden = true;
   }
 
   try {
-    const response = await fetch(buildSourceUrl(sourceGuid), { credentials: "omit", cache: "no-store" });
-    if (!response.ok) throw new Error("HTTP " + response.status);
-    const payload = await response.json();
-    const data = buildDataFromPayload(payload);
-    if (!isValidData(data)) throw new Error("Missing times");
-
+    const data = await fetchLatestData(sourceGuid);
     currentData = data;
     saveCachedData(sourceGuid, data);
     setTimes(data);
     startCountdownTimer();
   } catch {
+    if (cachedEntry) {
+      setStatus("Showing saved times (update failed).", { hideTimes: false });
+      return;
+    }
+
     setStatus("Failed to load times");
-    document.getElementById("next").hidden = true;
+    const nextEl = getEl("next");
+    if (nextEl) nextEl.hidden = true;
   }
 }
 
 async function saveMasjidSource() {
-  const inputEl = document.getElementById("masjid-link");
-  const saveButtonEl = document.getElementById("save-masjid");
-  const sourceGuid = extractGuidFromInput(inputEl.value);
+  const inputEl = getEl("masjid-link");
+  const saveButtonEl = getEl("save-masjid");
+  if (!inputEl || !saveButtonEl) return;
 
+  const sourceGuid = extractGuidFromInput(inputEl.value);
   if (!sourceGuid) {
     setConfigStatus("Paste a valid My-Masjid link or UUID.", "error");
     return;
@@ -415,7 +513,7 @@ async function saveMasjidSource() {
     localStorage.removeItem(CACHE_KEY);
     inputEl.value = buildTimingsScreenUrl(sourceGuid);
     setConfigStatus("Masjid updated. Reloading times...", "success");
-    await loadTimes(true);
+    await loadTimes({ forceRefresh: true, sourceGuid });
   } catch {
     setConfigStatus("Could not save masjid link.", "error");
   } finally {
@@ -423,24 +521,35 @@ async function saveMasjidSource() {
   }
 }
 
-async function initSourceForm() {
-  const inputEl = document.getElementById("masjid-link");
-  const saveButtonEl = document.getElementById("save-masjid");
-  const sourceGuid = await getStoredSourceGuid();
+function initSourceForm(sourceGuid) {
+  const inputEl = getEl("masjid-link");
+  const saveButtonEl = getEl("save-masjid");
+  if (!inputEl || !saveButtonEl) return;
 
   inputEl.value = buildTimingsScreenUrl(sourceGuid);
   saveButtonEl.addEventListener("click", () => {
-    saveMasjidSource();
+    void saveMasjidSource();
   });
   inputEl.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
-      saveMasjidSource();
+      void saveMasjidSource();
     }
   });
 }
 
-updateDate();
-initSourceForm();
-loadTimes();
-loadNameOfAllah();
+async function init() {
+  updateDate();
+  void loadNameOfAllah();
+
+  let sourceGuid = DEFAULT_SOURCE_GUID;
+  try {
+    sourceGuid = await getStoredSourceGuid();
+  } catch {
+    // Keep default GUID when storage is unavailable.
+  }
+  initSourceForm(sourceGuid);
+  await loadTimes({ sourceGuid });
+}
+
+void init();

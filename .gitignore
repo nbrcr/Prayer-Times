@@ -1,0 +1,6 @@
+# Build/release artifacts
+dist/
+
+# Archive packages
+*.zip
+*.xpi

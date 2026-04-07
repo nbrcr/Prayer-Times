@@ -3,7 +3,9 @@ const COUNTDOWN_NAMES = ["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"];
 const SOURCE_GUID = "1820245c-9db2-4b80-b9b7-d93dbb7879ef";
 const SOURCE_URL = `https://time.my-masjid.com/api/TimingsInfoScreen/GetMasjidTimings?GuidId=${SOURCE_GUID}`;
 const CACHE_KEY = "prayerTimesCache";
+const CACHE_VERSION = 2;
 const BADGE_ALARM = "updateBadge";
+const extensionApi = globalThis.browser ?? globalThis.chrome;
 
 function normalizeTimeValue(value) {
   if (value === null || value === undefined) return null;
@@ -16,6 +18,16 @@ function normalizeTimeValue(value) {
   if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
 
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function shiftTimeValue(timeText, minutesToAdd) {
+  const minutes = parseTimeToMinutes(timeText);
+  if (minutes === null) return null;
+
+  const shifted = ((minutes + minutesToAdd) % 1440 + 1440) % 1440;
+  const hours = Math.floor(shifted / 60);
+  const minutesPart = shifted % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutesPart).padStart(2, "0")}`;
 }
 
 function parseTimeToMinutes(timeText) {
@@ -51,14 +63,15 @@ function parseTimesFromPayload(payload, now = new Date()) {
   const model = payload?.model;
   const today = getTodaySalahEntry(model, now);
   if (!today) return null;
+  const dstOffset = model?.masjidSettings?.isDstOn ? 60 : 0;
 
   return {
-    Fajr: normalizeTimeValue(today.fajr),
-    Sunrise: normalizeTimeValue(today.shouruq),
-    Dhuhr: normalizeTimeValue(today.zuhr),
-    Asr: normalizeTimeValue(today.asr),
-    Maghrib: normalizeTimeValue(today.maghrib),
-    Isha: normalizeTimeValue(today.isha)
+    Fajr: shiftTimeValue(today.fajr, dstOffset),
+    Sunrise: shiftTimeValue(today.shouruq, dstOffset),
+    Dhuhr: shiftTimeValue(today.zuhr, dstOffset),
+    Asr: shiftTimeValue(today.asr, dstOffset),
+    Maghrib: shiftTimeValue(today.maghrib, dstOffset),
+    Isha: shiftTimeValue(today.isha, dstOffset)
   };
 }
 
@@ -120,9 +133,10 @@ function getTodayKey() {
 }
 
 async function readCachedTimes() {
-  const result = await chrome.storage.local.get(CACHE_KEY);
+  const result = await extensionApi.storage.local.get(CACHE_KEY);
   const payload = result[CACHE_KEY];
   if (!payload || typeof payload !== "object") return null;
+  if (payload.version !== CACHE_VERSION) return null;
   if (payload.date !== getTodayKey()) return null;
   if (!payload.times || typeof payload.times !== "object") return null;
   if (!isValidTimes(payload.times)) return null;
@@ -131,10 +145,11 @@ async function readCachedTimes() {
 
 async function saveCachedTimes(times) {
   const payload = {
+    version: CACHE_VERSION,
     date: getTodayKey(),
     times
   };
-  await chrome.storage.local.set({ [CACHE_KEY]: payload });
+  await extensionApi.storage.local.set({ [CACHE_KEY]: payload });
 }
 
 function getNextPrayer(times) {
@@ -180,25 +195,25 @@ async function updateBadge() {
     if (!next.time) throw new Error("Missing next time");
     const ms = next.time - new Date();
     const badgeText = formatBadgeText(ms);
-    await chrome.action.setBadgeBackgroundColor({ color: "#0f172a" });
-    await chrome.action.setBadgeText({ text: badgeText });
-    await chrome.action.setTitle({ title: `Next: ${next.name} in ${badgeText}` });
+    await extensionApi.action.setBadgeBackgroundColor({ color: "#0f172a" });
+    await extensionApi.action.setBadgeText({ text: badgeText });
+    await extensionApi.action.setTitle({ title: `Next: ${next.name} in ${badgeText}` });
   } catch (err) {
-    await chrome.action.setBadgeText({ text: "" });
-    await chrome.action.setTitle({ title: "Prayer Times" });
+    await extensionApi.action.setBadgeText({ text: "" });
+    await extensionApi.action.setTitle({ title: "Prayer Times" });
   }
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create(BADGE_ALARM, { periodInMinutes: 1 });
+extensionApi.runtime.onInstalled.addListener(() => {
+  extensionApi.alarms.create(BADGE_ALARM, { periodInMinutes: 1 });
   updateBadge();
 });
 
-chrome.runtime.onStartup.addListener(() => {
-  chrome.alarms.create(BADGE_ALARM, { periodInMinutes: 1 });
+extensionApi.runtime.onStartup.addListener(() => {
+  extensionApi.alarms.create(BADGE_ALARM, { periodInMinutes: 1 });
   updateBadge();
 });
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+extensionApi.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === BADGE_ALARM) updateBadge();
 });

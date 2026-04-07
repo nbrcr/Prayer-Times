@@ -11,7 +11,10 @@
     }
   },
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "scripts": [
+      "background.js"
+    ]
   },
   "icons": {
     "128": "icon.png"
@@ -22,5 +25,15 @@
   ],
   "host_permissions": [
     "https://time.my-masjid.com/*"
-  ]
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "aalborg-prayer-times@extension.local",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  }
 }

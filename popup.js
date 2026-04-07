@@ -5,11 +5,13 @@ const MASJID_GUID_KEY = "masjidSourceGuid";
 const SOURCE_URL_PREFIX = "https://time.my-masjid.com/api/TimingsInfoScreen/GetMasjidTimings?GuidId=";
 const NAMES_URL = "names.json";
 const CACHE_KEY = "prayerTimesCache";
+const CACHE_VERSION = 2;
 const REQUEST_TIMEOUT_MS = 4500;
 const RETRY_DELAYS_MS = [300, 900];
 const GUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const GUID_FINDER_REGEX = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 const DASH = "--";
+const extensionApi = globalThis.browser ?? globalThis.chrome;
 
 let currentData = null;
 let countdownTimer = null;
@@ -63,12 +65,12 @@ function extractGuidFromInput(inputText) {
 }
 
 async function getStoredSourceGuid() {
-  const result = await chrome.storage.local.get(MASJID_GUID_KEY);
+  const result = await extensionApi.storage.local.get(MASJID_GUID_KEY);
   return normalizeGuid(result[MASJID_GUID_KEY]) || DEFAULT_SOURCE_GUID;
 }
 
 async function setStoredSourceGuid(guid) {
-  await chrome.storage.local.set({ [MASJID_GUID_KEY]: guid });
+  await extensionApi.storage.local.set({ [MASJID_GUID_KEY]: guid });
 }
 
 function setStatus(message, options = {}) {
@@ -162,6 +164,16 @@ function normalizeTimeValue(value) {
   if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
 
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function shiftTimeValue(timeText, minutesToAdd) {
+  const minutes = parseTimeToMinutes(timeText);
+  if (minutes === null) return null;
+
+  const shifted = ((minutes + minutesToAdd) % 1440 + 1440) % 1440;
+  const hours = Math.floor(shifted / 60);
+  const minutesPart = shifted % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutesPart).padStart(2, "0")}`;
 }
 
 function parseTimeToMinutes(timeText) {
@@ -304,6 +316,7 @@ function readCachedData(sourceGuid) {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return null;
+    if (parsed.version !== CACHE_VERSION) return null;
     if (normalizeGuid(parsed.guid || "") !== sourceGuid) return null;
     if (!isValidData(parsed.data)) return null;
 
@@ -319,6 +332,7 @@ function readCachedData(sourceGuid) {
 function saveCachedData(sourceGuid, data) {
   try {
     const payload = {
+      version: CACHE_VERSION,
       date: getTodayKey(),
       guid: sourceGuid,
       data
@@ -345,18 +359,19 @@ function buildDataFromPayload(payload, now = new Date()) {
   const model = payload?.model;
   const today = getTodaySalahEntry(model, now);
   if (!today) return null;
+  const dstOffset = model?.masjidSettings?.isDstOn ? 60 : 0;
 
   const times = {
-    Fajr: normalizeTimeValue(today.fajr),
-    Sunrise: normalizeTimeValue(today.shouruq),
-    Dhuhr: normalizeTimeValue(today.zuhr),
-    Asr: normalizeTimeValue(today.asr),
-    Maghrib: normalizeTimeValue(today.maghrib),
-    Isha: normalizeTimeValue(today.isha)
+    Fajr: shiftTimeValue(today.fajr, dstOffset),
+    Sunrise: shiftTimeValue(today.shouruq, dstOffset),
+    Dhuhr: shiftTimeValue(today.zuhr, dstOffset),
+    Asr: shiftTimeValue(today.asr, dstOffset),
+    Maghrib: shiftTimeValue(today.maghrib, dstOffset),
+    Isha: shiftTimeValue(today.isha, dstOffset)
   };
 
   const masjidSettings = model?.masjidSettings || {};
-  const jumuahTime = masjidSettings.showJumahTime ? normalizeTimeValue(masjidSettings.jumahTime) : null;
+  const jumuahTime = masjidSettings.showJumahTime ? shiftTimeValue(masjidSettings.jumahTime, dstOffset) : null;
 
   const masjidDetails = model?.masjidDetails || {};
   let locationLabel = "";
@@ -428,7 +443,7 @@ async function loadNameOfAllah() {
   if (!translitEl || !meaningEl) return;
 
   try {
-    const url = chrome.runtime.getURL(NAMES_URL);
+    const url = extensionApi.runtime.getURL(NAMES_URL);
     const response = await fetch(url);
     if (!response.ok) throw new Error("HTTP " + response.status);
     const names = await response.json();
